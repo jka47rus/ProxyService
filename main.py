@@ -1,9 +1,8 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config.config import Config
-from config.database import async_session, engine, Base
+from config.database import engine, Base
 from services.proxy_service import ProxyService
 from repositories.proxy_repository import ProxyRepository
 from services.email_service import EmailService
@@ -44,42 +43,73 @@ class ProxySchedulerTasks:
             await EmailService.send_alarm_email(0)
             return
 
-        async with async_session() as session:
-            async with session.begin():
-                for proxy in proxies:
-                    # Используем ваш метод проверки из ProxyService
-                    is_working = await ProxyService.check_proxy(proxy.proxy_url)
+        # 2. Создаем очередь в памяти и список для накопления результатов
+        queue = asyncio.Queue()
 
-                    if is_working:
-                        # Если работает — обнуляем счётчик ошибок
-                        if proxy.failed_attempts > 0:
-                            logging.info(f"Прокси ожил, обнуляем счётчик ошибок: {proxy.proxy_url}")
-                            proxy.failed_attempts = 0
-                        proxy.last_checked = datetime.now(timezone.utc)
-                        proxy.is_active = True
-                    else:
-                        # Если не работает — инкрементим счётчик
-                        proxy.failed_attempts += 1
-                        proxy.last_checked = datetime.now(timezone.utc)
-                        logging.warning(f"Прокси не ответил ({proxy.failed_attempts}/{Config.PROXIES_FAILED_ATTEMPTS}): {proxy.proxy_url}")
+        # 3. Пишем фонового потребителя, который будет собирать результаты и писать в БД пачками по 10 штук
+        async def db_saver_consumer():
+            batch = []
+            while True:
+                try:
+                    # Ждем данные из воркеров
+                    item = await queue.get()
 
-                        # Если попыток стало 3 или больше — удаляем из базы физически
-                        if proxy.failed_attempts >= Config.PROXIES_FAILED_ATTEMPTS:
-                            logging.danger = logging.error  # просто логируем жесткую ошибку
-                            logging.error(f"Удаляем прокси из БД ({Config.PROXIES_FAILED_ATTEMPTS} неудачные проверки подряд): {proxy.proxy_url}")
-                            await session.delete(proxy)
-                        else:
-                            # Временно помечаем неактивным, но не удаляем
-                            proxy.is_active = False
+                    # Сигнал завершения (poison pill)
+                    if item is None:
+                        if batch:
+                            await ProxyRepository.update_proxies_batch(batch)
+                        queue.task_done()
+                        break
 
-        # После проверки всех прокси и завершения транзакции смотрим остаток
+                    batch.append(item)
+
+                    # Как только накопили 10 штук — пушим батч в базу
+                    if len(batch) >= 10:
+                        await ProxyRepository.update_proxies_batch(batch)
+                        batch.clear()
+
+                    queue.task_done()
+                except Exception as e:
+                    logging.error(f"Ошибка в фоновом сохранителе проверок БД: {e}")
+
+        # Запускаем потребителя базы данных в фоне
+        saver_task = asyncio.create_task(db_saver_consumer())
+
+        # 4. Пишем воркер для проверки (он не трогает БД, а только пушит данные в очередь)
+        semaphore = asyncio.Semaphore(50)
+
+        async def db_proxy_worker(proxy):
+            async with semaphore:
+                is_working = await ProxyService.check_proxy(proxy.proxy_url)
+
+                # Формируем словарь с новыми данными для этого прокси
+                updated_data = {
+                    "proxy_url": proxy.proxy_url,
+                    "is_working": is_working,
+                    "failed_attempts": proxy.failed_attempts,
+                    "is_active": proxy.is_active
+                }
+                # Кидаем в очередь в памяти
+                queue.put_nowait(updated_data)
+
+        # 5. Запускаем параллельную проверку пулом по 50 штук
+        tasks = [db_proxy_worker(p) for p in proxies]
+        await asyncio.gather(*tasks)
+
+        # 6. ОстанавливаемSaver: шлем сигнал завершения и ждем окончания записи остатков
+        await queue.put(None)
+        await saver_task
+
+        logging.info("Параллельная перепроверка базы данных успешно завершена.")
+
+        # 5. Смотрим остаток и шлём email при необходимости
         active_count = await ProxyRepository.get_active_count()
         logging.info(f"Проверка базы завершена. Осталось живых прокси: {active_count}")
 
-        # Если прокси мало — шлём письмо
         if active_count < Config.MIN_PROXIES_LIMIT:
             logging.warning(
-                f"Количество прокси ({active_count}) ниже лимита ({Config.MIN_PROXIES_LIMIT})! Отправляю email...")
+                f"Количество прокси ({active_count}) ниже лимита ({Config.MIN_PROXIES_LIMIT})! Отправляю email..."
+            )
             await EmailService.send_alarm_email(active_count)
 
 
