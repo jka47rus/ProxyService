@@ -42,14 +42,15 @@ services:
     volumes:
       # Связываем физическую папку proxy_list на сервере с папкой внутри контейнера
       - ./proxy_list:/app/proxy_list
-    depends_on:
-      postgres:
-        condition: service_healthy
+#    depends_on:
+#      postgres:
+#        condition: service_healthy
     networks:
       - proxy_network
 
-volumes:
-  proxy_pg_data:
+#volumes:
+#  proxy_pg_data:
 networks:
   proxy_network:
-    driver: bridge
+    name: proxy_adapter_proxy_network
+    external: true
