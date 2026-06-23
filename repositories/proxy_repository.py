@@ -4,6 +4,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy import select, func
 from config.database import async_session
 from models.proxy import ProxyEntity
+from config.config import Config
 
 class ProxyRepository:
 
@@ -59,3 +60,45 @@ class ProxyRepository:
             stmt = select(func.count()).select_from(ProxyEntity).where(ProxyEntity.failed_attempts < 3)
             result = await session.execute(stmt)
             return result.scalar() or 0
+
+    @staticmethod
+    async def update_proxies_batch(batch_data: list[dict]) -> None:
+        """Принимает пачку из 10 проверенных прокси и обновляет их в одной транзакции."""
+        if not batch_data:
+            return
+
+        async with async_session() as session:
+            async with session.begin():
+                try:
+                    for item in batch_data:
+                        # Воссоздаем объект, передавая ВСЕ системные поля, чтобы merge прошел корректно
+                        proxy_obj = ProxyEntity(
+                            proxy_url=item["proxy_url"],
+                            last_checked=datetime.now(timezone.utc),
+                            is_active=item["is_active"],
+                            failed_attempts=item["failed_attempts"]
+                        )
+
+                        # Подгружаем объект в контекст транзакции
+                        db_proxy = await session.merge(proxy_obj)
+
+                        if item["is_working"]:
+                            # Если прокси ответил — обнуляем ошибки и включаем его
+                            db_proxy.failed_attempts = 0
+                            db_proxy.is_active = True
+                        else:
+                            # Если не ответил — инкрементируем переданный счетчик
+                            db_proxy.failed_attempts += 1
+
+                            # Если попыток стало 3 или больше — физически удаляем
+                            if db_proxy.failed_attempts >= Config.PROXIES_FAILED_ATTEMPTS:
+                                logging.error(f"Удаляем прокси из БД (батч): {db_proxy.proxy_url}")
+                                await session.delete(db_proxy)
+                            else:
+                                # Временно выключаем, но оставляем в базе расти до 3 ошибок
+                                db_proxy.is_active = False
+
+                    logging.info(f"🎰 Батч из {len(batch_data)} результатов проверок успешно сохранен в БД.")
+                except Exception as e:
+                    logging.error(f"Ошибка при сохранении батча проверок в БД: {e}")
+

@@ -81,7 +81,7 @@ class ProxyService:
             await asyncio.gather(*tasks)
 
             remove(file_path)
-            logging.info(f"Файл {file_path} успешно обработан параллельно и удален.")
+            logging.info(f"Файл {file_path} успешно обработан и удален.")
 
         except Exception as e:
             logging.error(f"Ошибка при обработке файла {file_path}: {e}")

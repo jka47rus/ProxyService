@@ -8,11 +8,8 @@ class ProxyEntity(Base):
     __tablename__ = "proxies"
     __table_args__ = {"schema": "proxy_bot"}
 
-    # @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-
     # @Column(unique = true, nullable = false, length = 255)
-    proxy_url: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    proxy_url: Mapped[str] = mapped_column(String(255), primary_key=True, nullable=False)
 
     # Время последней проверки (по умолчанию текущее время)
     last_checked: Mapped[datetime] = mapped_column(
