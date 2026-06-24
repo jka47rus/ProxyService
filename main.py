@@ -76,7 +76,7 @@ class ProxySchedulerTasks:
         saver_task = asyncio.create_task(db_saver_consumer())
 
         # 4. Пишем воркер для проверки (он не трогает БД, а только пушит данные в очередь)
-        semaphore = asyncio.Semaphore(50)
+        semaphore = asyncio.Semaphore(20)
 
         async def db_proxy_worker(proxy):
             async with semaphore:

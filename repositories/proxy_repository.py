@@ -26,7 +26,8 @@ class ProxyRepository:
                         stmt = insert(ProxyEntity).values(
                             proxy_url=url,
                             last_checked=datetime.now(timezone.utc),
-                            is_active=True
+                            is_active=True,
+                            failed_attempts=0
                         )
 
                         # Добавляем правило ON CONFLICT (UPSERT)
@@ -35,7 +36,8 @@ class ProxyRepository:
                             index_elements=[ProxyEntity.proxy_url],  # По какому полю уникальность
                             set_={
                                 'last_checked': datetime.now(timezone.utc),
-                                'is_active': True
+                                'is_active': True,
+                                'failed_attempts': 0
                             }
                         )
 
@@ -89,16 +91,14 @@ class ProxyRepository:
                         else:
                             # Если не ответил — инкрементируем переданный счетчик
                             db_proxy.failed_attempts += 1
+                            db_proxy.is_active = False
 
                             # Если попыток стало 3 или больше — физически удаляем
                             if db_proxy.failed_attempts >= Config.PROXIES_FAILED_ATTEMPTS:
-                                logging.error(f"Удаляем прокси из БД (батч): {db_proxy.proxy_url}")
+                                logging.info(f"Удаляем прокси из БД (батч): {db_proxy.proxy_url}")
                                 await session.delete(db_proxy)
-                            else:
-                                # Временно выключаем, но оставляем в базе расти до 3 ошибок
-                                db_proxy.is_active = False
 
-                    logging.info(f"🎰 Батч из {len(batch_data)} результатов проверок успешно сохранен в БД.")
+                    logging.info(f"Батч из {len(batch_data)} результатов проверок успешно сохранен в БД.")
                 except Exception as e:
                     logging.error(f"Ошибка при сохранении батча проверок в БД: {e}")
 

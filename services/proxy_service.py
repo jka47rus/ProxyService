@@ -14,17 +14,19 @@ class ProxyService:
         """Универсально проверяет доступность Telegram API через HTTP или SOCKS5."""
         try:
             timeout = aiohttp.ClientTimeout(total=Config.TIME_OF_CHECKING_PROXY_SECONDS)
-
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
             # Если это SOCKS5, используем коннектор ProxyConnector
             if proxy_url.startswith("socks5://"):
                 connector = ProxyConnector.from_url(proxy_url)
-                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                async with aiohttp.ClientSession(connector=connector, timeout=timeout, headers=headers) as session:
                     async with session.get("https://telegram.org", allow_redirects=False) as resp:
                         return resp.status in [200, 404]
 
             # If это обычный HTTP/HTTPS прокси, передаем его напрямую в аргумент proxy
             else:
-                async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
                     async with session.get("https://telegram.org", proxy=proxy_url, allow_redirects=False) as resp:
                         return resp.status in [200, 404]
         except Exception:
@@ -75,8 +77,8 @@ class ProxyService:
                 if
                 (url := line.strip()) and not url.startswith("#") and "://" in url and not url.startswith("socks4://")}
 
-            # Запускаем параллельную проверку пулом в 50 одновременных запросов
-            semaphore = asyncio.Semaphore(50)
+            # Запускаем параллельную проверку пулом в 20 одновременных запросов
+            semaphore = asyncio.Semaphore(20)
             tasks = [cls._worker(url, semaphore, queue) for url in raw_urls]
             await asyncio.gather(*tasks)
 
