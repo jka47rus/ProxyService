@@ -33,6 +33,47 @@ class ProxyService:
             return False
 
     @classmethod
+    async def download_proxies_from_web(cls) -> list[str]:
+        """
+        Скачивает списки прокси из GitHub/CDN.
+        Делает до 3 попыток скачать каждый файл. Склеивает с правильным протоколом.
+        """
+        urls_to_scrape = {
+            "http://": "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/protocols/http/data.txt",
+            "socks5://": "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/protocols/socks5/data.txt"
+        }
+
+        discovered_urls = []
+        timeout = aiohttp.ClientTimeout(total=20)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for protocol, web_url in urls_to_scrape.items():
+                success = False
+                # Пытаемся скачать конкретный файл до 3 раз подряд
+                for attempt in range(1, 4):
+                    try:
+                        logging.info(f"Скачиваю прокси с веба (Попытка {attempt}/3): {web_url}")
+                        async with session.get(web_url) as resp:
+                            if resp.status == 200:
+                                text_data = await resp.text()
+                                lines = text_data.splitlines()
+                                for line in lines:
+                                    proxy_url = line.strip()
+                                    if proxy_url and "://" in proxy_url:
+                                        discovered_urls.append(proxy_url)
+
+                                logging.info(f"Успешно скачано {len(lines)} строк для протокола {protocol}")
+                                success = True
+                                break  # Выходим из цикла попыток, так как успешно скачали
+                    except Exception as e:
+                        logging.warning(f"Ошибка при скачивании прокси (Попытка {attempt}): {e}")
+                        await asyncio.sleep(2)  # Пауза между попытками
+                if not success:
+                    # Если после 3 попыток один из файлов не скачался, выбрасываем ошибку
+                    raise RuntimeError(f"Не удалось скачать список прокси по ссылке: {web_url}")
+        return list(set(discovered_urls))  # Возвращаем список без дубликатов
+
+    @classmethod
     async def find_working_proxy_local_scrape(cls) -> list[str]:
         """Главная точка входа: координирует процесс парсинга папки."""
         search_pattern = path.join(Config.FOLDER_PATH, "*.txt")
@@ -49,7 +90,7 @@ class ProxyService:
         working_proxies = []
 
         # 1. Запускаем фонового потребителя для записи батчей в БД
-        saver_task = asyncio.create_task(cls._db_saver_consumer(queue, working_proxies))
+        saver_task = asyncio.create_task(cls.db_saver_consumer(queue, working_proxies))
 
         # 2. Обрабатываем каждый файл
         for file_path in file_paths:
@@ -79,7 +120,7 @@ class ProxyService:
 
             # Запускаем параллельную проверку пулом в 20 одновременных запросов
             semaphore = asyncio.Semaphore(20)
-            tasks = [cls._worker(url, semaphore, queue) for url in raw_urls]
+            tasks = [cls.worker(url, semaphore, queue) for url in raw_urls]
             await asyncio.gather(*tasks)
 
             remove(file_path)
@@ -88,16 +129,16 @@ class ProxyService:
         except Exception as e:
             logging.error(f"Ошибка при обработке файла {file_path}: {e}")
 
-    @classmethod
-    async def _worker(cls, url: str, semaphore: asyncio.Semaphore, queue: asyncio.Queue) -> None:
+    @staticmethod
+    async def worker(url: str, semaphore: asyncio.Semaphore, queue: asyncio.Queue) -> None:
         """Отвечает за проверку одного конкретного прокси и отправку его в очередь."""
         async with semaphore:
-            if await cls.check_proxy(url):
+            if await ProxyService.check_proxy(url):
                 logging.info(f"Рабочий прокси найден: {url}")
                 queue.put_nowait(url)
 
-    @classmethod
-    async def _db_saver_consumer(cls, queue: asyncio.Queue, working_proxies: list[str]) -> None:
+    @staticmethod
+    async def db_saver_consumer(queue: asyncio.Queue, working_proxies: list[str]) -> None:
         """Фоновый метод: слушает очередь и сохраняет прокси батчами по 10 штук в БД."""
         batch = []
         while True:

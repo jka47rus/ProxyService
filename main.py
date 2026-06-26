@@ -26,7 +26,7 @@ class ProxySchedulerTasks:
 
     @staticmethod
     async def check_folder_job():
-        """Задача 1: Поиск новых файлов в папке (каждые 30 сек)."""
+        """Задача 1: Поиск новых файлов в папке."""
         # Вызываем метод, который мы переписывали ранее
         working_proxies = await ProxyService.find_working_proxy_local_scrape()
         if working_proxies:
@@ -110,8 +110,41 @@ class ProxySchedulerTasks:
             logging.warning(
                 f"Количество прокси ({active_count}) ниже лимита ({Config.MIN_PROXIES_LIMIT})! Отправляю email..."
             )
-            await EmailService.send_alarm_email(active_count)
+            try:
+                # 1. Скачиваем свежие списки (внутри метода уже зашиты 3 попытки)
+                web_proxies = await ProxyService.download_proxies_from_web()
+                if web_proxies:
+                    logging.info(f"Найдено {len(web_proxies)} прокси в сети. Запускаю их параллельную проверку...")
+                    # Прогоняем скачанные с веба прокси через наш стандартный файловый парсер!
+                    # Нам не нужно писать новый код, мы просто вызовем наш  метод, передав список в воркеры
+                    web_queue = asyncio.Queue()
+                    web_working = []
 
+                    # Запускаем фоновый накопитель для вставки в БД
+                    web_saver_task = asyncio.create_task(ProxyService.db_saver_consumer(web_queue, web_working))
+
+                    # Проверяем скачанные URL семафором на 20 потоков
+                    web_semaphore = asyncio.Semaphore(20)
+                    web_tasks = [ProxyService.worker(url, web_semaphore, web_queue) for url in web_proxies]
+                    await asyncio.gather(*web_tasks)
+
+                    # Мягко закрываем очередь веба
+                    await web_queue.put(None)
+                    await web_saver_task
+
+                    # Смотрим, сколько прокси удалось реально залить в базу после веб-парсинга
+                    active_count = await ProxyRepository.get_active_count()
+                    logging.info(f"Авто-добор завершен. Текущее количество живых прокси в БД: {active_count}")
+
+            except Exception as web_error:
+                logging.error(
+                    f"🚨 Критический сбой авто-добора прокси (все 3 попытки скачивания провалились): {web_error}")
+
+                # 2. И только если ДАЖЕ ПОСЛЕ веб-парсинга прокси всё равно мало — бьем тревогу на e-mail
+            if active_count < Config.MIN_PROXIES_LIMIT:
+                logging.critical(
+                    f"❌ Авто-добор не помог или упал. В базе по-прежнему мало прокси ({active_count}). Отправляю email...")
+                await EmailService.send_alarm_email(active_count)
 
 async def main():
     await init_db_tables()
